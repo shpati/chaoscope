@@ -1,4 +1,4 @@
-/* chaoscope_gui.c -- Win32 front end for chaoscope.exe
+/* chaoscope_gui.c -- Win32 front end for chaoscope.exe 
  *
  * Every picture is produced by running chaoscope.exe as a child process; the
  * BMP it writes is loaded and shown.  Systems, their parameter names and

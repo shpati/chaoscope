@@ -1,4 +1,4 @@
-/* chaoscope.c -- a pure-C "Chaoscope"-style strange attractor renderer.
+/* chaoscope.c -- a pure-C "Chaoscope"-style strange attractor renderer. 
  *
  * Reimplementation of the idea behind Nicolas Desprez's Chaoscope (Windows):
  * integrate a chaotic dynamical system, rotate/zoom the 3D view, cycle a
