@@ -1,4 +1,4 @@
-/* chaoscope_gui.c -- Win32 front end for chaoscope.exe 
+/* chaoscope_gui.c -- Win32 front end for chaoscope.exe
  *
  * Every picture is produced by running chaoscope.exe as a child process; the
  * BMP it writes is loaded and shown.  Systems, their parameter names and
@@ -74,7 +74,7 @@ enum {
     IDC_PLAB = 110,                       /* 110..115 parameter labels      */
     IDC_PED  = 120,                       /* 120..125 parameter edits       */
     IDC_DT   = 140, IDC_DEFAULTS,
-    IDC_YAW  = 150, IDC_PITCH, IDC_ROLL, IDC_ZOOM, IDC_CYCLE,   /* sliders  */
+    IDC_YAW  = 150, IDC_PITCH, IDC_ROLL, IDC_ZOOM, IDC_CYCLE, IDC_GAMMA,   /* sliders  */
     IDC_YAWV = 160,                       /* 160..164 value labels          */
     IDC_RESETVIEW = 170,
     IDC_PAL  = 180, IDC_SPLAT, IDC_W, IDC_H, IDC_ITER, IDC_SEED, IDC_DICE,
@@ -103,20 +103,21 @@ typedef struct {
 typedef struct {
     int    sys, pal, splat, w, h, iters, seed;
     double p[UIP], dt;
-    double yaw, pitch, roll, zoom, cycle, panx, pany;
+    double yaw, pitch, roll, zoom, cycle, panx, pany, gam;
 } Settings;
 
 static Sys  g_sys[MAXSYS];  static int g_nsys;
 static char g_pal[MAXPAL][24]; static int g_npal;
 
-static const struct { int id; const char *label; int lo, hi; double scale; const char *fmt; } VIEW[5] = {
+static const struct { int id; const char *label; int lo, hi; double scale; const char *fmt; } VIEW[6] = {
     { IDC_YAW,   "Yaw",   -180, 180, 1.0,  "%.0f\xB0" },
     { IDC_PITCH, "Pitch", -180, 180, 1.0,  "%.0f\xB0" },
     { IDC_ROLL,  "Roll",  -180, 180, 1.0,  "%.0f\xB0" },
     { IDC_ZOOM,  "Zoom",    10, 2000, 0.01, "%.2fx"    },
     { IDC_CYCLE, "Cycle",    0, 100, 0.01, "%.2f"     },
+    { IDC_GAMMA, "Gamma",   30, 400, 0.01, "%.2f"     },
 };
-static const double VIEW_DEFAULT[5] = { 180.0, 180.0, 0.0, 1.0, 0.0 };
+static const double VIEW_DEFAULT[6] = { 180.0, 180.0, 0.0, 1.0, 0.0, 1.0 };
 
 typedef enum { K_PREVIEW = 1, K_FULL, K_SAVE, K_ANIM } Kind;
 
@@ -131,7 +132,7 @@ static struct {
     int    drag, dx0, dy0;
     double    panx, pany;
     unsigned seq;
-    double vw[5];                       /* yaw, pitch, roll, zoom, cycle   */
+    double vw[6];                       /* yaw, pitch, roll, zoom, cycle   */
     char   exe[MAX_PATH], tmpdir[MAX_PATH], fullfile[MAX_PATH];
 } g;
 
@@ -353,7 +354,7 @@ static int read_settings(Settings *s, char *err, size_t ecap) {
     s->pal = (int)SendMessage(CTL(IDC_PAL), CB_GETCURSEL, 0, 0);
     if (s->pal < 0) s->pal = 0;
     s->yaw = g.vw[0]; s->pitch = g.vw[1]; s->roll = g.vw[2];
-    s->zoom = g.vw[3]; s->cycle = g.vw[4];
+    s->zoom = g.vw[3]; s->cycle = g.vw[4]; s->gam = g.vw[5];
     s->panx = g.panx; s->pany = g.pany;
     return 1;
 }
@@ -376,9 +377,9 @@ static void build_cmd(char *d, size_t cap, const Settings *s, const char *exe,
     n = snprintf(d, cap,
         "\"%s\" --system %s --width %d --height %d --iterations %d --dt %.10g"
         " --yaw %.6g --pitch %.6g --roll %.6g --zoom %.6g --palette %s"
-        " --cycle %.6g --splat %d --seed %d --panx %.6g --pany %.6g",
+        " --cycle %.6g --splat %d --seed %d --panx %.6g --pany %.6g --gamma %.4g",
         exe, sy->name, s->w, s->h, s->iters, s->dt, s->yaw, s->pitch, s->roll,
-        s->zoom, g_pal[s->pal], s->cycle, s->splat, s->seed, s->panx, s->pany);
+        s->zoom, g_pal[s->pal], s->cycle, s->splat, s->seed, s->panx, s->pany, s->gam);
     if (n < 0 || (size_t)n >= cap) return;
     if (sy->np > 0) {
         n += snprintf(d + n, cap - n, " --params ");
@@ -571,7 +572,7 @@ static void view_label(int i) {
 static void set_view_ui(void) {
     int i;
     g.ui_lock++;
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 6; i++) {
         SendMessage(CTL(VIEW[i].id), TBM_SETPOS, TRUE, (LPARAM)(int)floor(g.vw[i] / VIEW[i].scale + 0.5));
         view_label(i);
     }
@@ -796,8 +797,8 @@ static void build_controls(void) {
     mk("BUTTON", "Defaults", BS_PUSHBUTTON | WS_TABSTOP, 0, 172, 196, 154, 24, IDC_DEFAULTS);
 
     /* view */
-    group("View", 234, 196);
-    for (i = 0; i < 5; i++) {
+    group("View", 234, 224);
+    for (i = 0; i < 6; i++) {
         int yy = 254 + i * 28;
         lab(VIEW[i].label, 14, yy, 44);
         c = mk(TRACKBAR_CLASS, "", WS_TABSTOP | TBS_HORZ | TBS_NOTICKS, 0, 58, yy, 200, 24, VIEW[i].id);
@@ -805,42 +806,42 @@ static void build_controls(void) {
         SendMessage(c, TBM_SETPAGESIZE, 0, i < 3 ? 15 : 10);
         mk("STATIC", "", SS_LEFT, 0, 264, yy + 3, 62, 18, IDC_YAWV + i);
     }
-    mk("BUTTON", "Reset view", BS_PUSHBUTTON | WS_TABSTOP, 0, 14, 396, 100, 26, IDC_RESETVIEW);
-    mk("STATIC", "drag image: rotate", SS_LEFT, 0, 124, 401, 202, 18, 0);
+    mk("BUTTON", "Reset view", BS_PUSHBUTTON | WS_TABSTOP, 0, 14, 424, 100, 26, IDC_RESETVIEW);
+    mk("STATIC", "drag image: rotate", SS_LEFT, 0, 124, 429, 202, 18, 0);
 
     /* render */
-    group("Render", 436, 136);
-    lab("Palette", 14, 456, 46);
-    c = mk("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 60, 456, 112, 200, IDC_PAL);
+    group("Render", 464, 136);
+    lab("Palette", 14, 484, 46);
+    c = mk("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 60, 484, 112, 200, IDC_PAL);
     for (i = 0; i < g_npal; i++) SendMessage(c, CB_ADDSTRING, 0, (LPARAM)g_pal[i]);
-    lab("Splat", 184, 456, 34);
-    c = mk("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 220, 456, 106, 200, IDC_SPLAT);
+    lab("Splat", 184, 484, 34);
+    c = mk("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 220, 484, 106, 200, IDC_SPLAT);
     for (i = 0; i <= 4; i++) { char b[4]; snprintf(b, sizeof b, "%d", i); SendMessage(c, CB_ADDSTRING, 0, (LPARAM)b); }
-    lab("Size", 14, 484, 46);
-    edit(IDC_W, 60, 484, 56);
-    lab("x", 121, 484, 10);
-    edit(IDC_H, 134, 484, 56);
-    lab("Iter", 200, 484, 30);
-    edit(IDC_ITER, 232, 484, 94);
-    lab("Seed", 14, 512, 46);
-    edit(IDC_SEED, 60, 512, 70);
-    mk("BUTTON", "New", BS_PUSHBUTTON | WS_TABSTOP, 0, 136, 511, 50, 24, IDC_DICE);
-    mk("BUTTON", "Spin", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 210, 513, 116, 20, IDC_SPIN);
-    mk("BUTTON", "Full quality when idle", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 14, 540, 312, 20, IDC_AUTO);
+    lab("Size", 14, 512, 46);
+    edit(IDC_W, 60, 512, 56);
+    lab("x", 121, 512, 10);
+    edit(IDC_H, 134, 512, 56);
+    lab("Iter", 200, 512, 30);
+    edit(IDC_ITER, 232, 512, 94);
+    lab("Seed", 14, 540, 46);
+    edit(IDC_SEED, 60, 540, 70);
+    mk("BUTTON", "New", BS_PUSHBUTTON | WS_TABSTOP, 0, 136, 539, 50, 24, IDC_DICE);
+    mk("BUTTON", "Spin", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 210, 541, 116, 20, IDC_SPIN);
+    mk("BUTTON", "Full quality when idle", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 14, 568, 312, 20, IDC_AUTO);
 
     /* actions */
-    y = 580;
+    y = 608;
     mk("BUTTON", "Render", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 6, y, 100, 30, IDC_RENDER);
     mk("BUTTON", "Save image...", BS_PUSHBUTTON | WS_TABSTOP, 0, 112, y, 112, 30, IDC_SAVE);
     mk("BUTTON", "Copy command", BS_PUSHBUTTON | WS_TABSTOP, 0, 230, y, 104, 30, IDC_COPY);
-    y = 618;
+    y = 646;
     lab("Frames", 6, y + 1, 46);
     edit(IDC_FRAMES, 54, y + 1, 56);
     mk("BUTTON", "Render animation...", BS_PUSHBUTTON | WS_TABSTOP, 0, 118, y, 216, 28, IDC_ANIM);
     g.content_h = S(y + 28 + 10);
 
     /* initial values */
-    for (i = 0; i < 5; i++) g.vw[i] = VIEW_DEFAULT[i];
+    for (i = 0; i < 6; i++) g.vw[i] = VIEW_DEFAULT[i];
     set_view_ui();
     SendMessage(CTL(IDC_SPLAT), CB_SETCURSEL, 2, 0);
     SetWindowText(CTL(IDC_W), "3840");
@@ -953,7 +954,7 @@ static void on_command(WPARAM w) {
         return;
     case IDC_RESETVIEW: {
         int i;
-        for (i = 0; i < 5; i++) g.vw[i] = VIEW_DEFAULT[i];
+        for (i = 0; i < 6; i++) g.vw[i] = VIEW_DEFAULT[i];
         g.panx = g.pany = 0.0;
         set_view_ui();
         request_render();
@@ -983,7 +984,7 @@ static void on_hscroll(LPARAM l) {
     HWND tb = (HWND)l;
     int id = GetDlgCtrlID(tb), i;
     if (g.ui_lock) return;
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 6; i++) {
         if (VIEW[i].id == id) {
             g.vw[i] = (int)SendMessage(tb, TBM_GETPOS, 0, 0) * VIEW[i].scale;
             view_label(i);

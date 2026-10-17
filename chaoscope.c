@@ -1,4 +1,4 @@
-/* chaoscope.c -- a pure-C "Chaoscope"-style strange attractor renderer. 
+/* chaoscope.c -- a pure-C "Chaoscope"-style strange attractor renderer.
  *
  * Reimplementation of the idea behind Nicolas Desprez's Chaoscope (Windows):
  * integrate a chaotic dynamical system, rotate/zoom the 3D view, cycle a
@@ -639,6 +639,7 @@ static const struct { const char *name; const PaletteStop *stops; int n; } PALET
 #define NPAL ((int)(sizeof(PALETTES)/sizeof(PALETTES[0])))
 
 static unsigned char lut[3][256]; /* r,g,b lookup tables */
+static double lut_gamma = 1.0;    /* output gamma applied to the table */
 
 /* Fill the lookup table from a stop list, rotated cyclically by `phase`. */
 static void build_lut(const PaletteStop *stops, int n, double phase) {
@@ -655,6 +656,11 @@ static void build_lut(const PaletteStop *stops, int n, double phase) {
         lut[0][i] = (unsigned char)(stops[seg].r + (stops[seg + 1].r - stops[seg].r) * f + 0.5);
         lut[1][i] = (unsigned char)(stops[seg].g + (stops[seg + 1].g - stops[seg].g) * f + 0.5);
         lut[2][i] = (unsigned char)(stops[seg].b + (stops[seg + 1].b - stops[seg].b) * f + 0.5);
+        if (lut_gamma != 1.0) {            /* >1 lifts dim regions, <1 deepens them */
+            int c;
+            for (c = 0; c < 3; c++)
+                lut[c][i] = (unsigned char)(255.0 * pow(lut[c][i] / 255.0, 1.0 / lut_gamma) + 0.5);
+        }
     }
 }
 
@@ -942,6 +948,7 @@ static void usage(FILE *out) {
     fprintf(out, "  --palette <name>     rainbow|fire|ice|plasma|chaoscope (default chaoscope)\n");
     fprintf(out, "  --cycle <f>          palette cycle phase 0..1 (default 0)\n");
     fprintf(out, "  --splat <n>          splat radius 0..4 (default 2)\n");
+    fprintf(out, "  --gamma <f>          output gamma 0.1..10 (default 1; >1 brightens dim regions)\n");
     fprintf(out, "  --params a,b,c,...   override leading system parameters (see --list)\n");
     fprintf(out, "  --seed <n>           RNG seed (default time-based)\n");
     fprintf(out, "  --output <file.bmp>  output file (default attractor.bmp)\n");
@@ -1006,6 +1013,7 @@ int main(int argc, char **argv) {
     double yaw = 0.0, pitch = 0.0, roll = 0.0;
     double zoom = 1.0, cycle = 0.0;
     double panx = 0.0, pany = 0.0;
+    double gamma_v = 1.0;
     int splat_r = 2;
     char outfile[256] = "attractor.bmp";
     int anim = 0;
@@ -1079,6 +1087,7 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--zoom") == 0)      { if (!val || !parse_double(val, &zoom))    return bad_value(a); i++; }
         else if (strcmp(a, "--panx") == 0)      { if (!val || !parse_double(val, &panx))    return bad_value(a); i++; }
         else if (strcmp(a, "--pany") == 0)      { if (!val || !parse_double(val, &pany))    return bad_value(a); i++; }
+        else if (strcmp(a, "--gamma") == 0)     { if (!val || !parse_double(val, &gamma_v)) return bad_value(a); i++; }
         else if (strcmp(a, "--cycle") == 0)     { if (!val || !parse_double(val, &cycle))   return bad_value(a); i++; }
         else if (strcmp(a, "--splat") == 0)     { if (!val || !parse_int(val, &splat_r))    return bad_value(a); i++; }
         else if (strcmp(a, "--seed") == 0)      { if (!val || !parse_int(val, &seed))       return bad_value(a); i++; }
@@ -1095,6 +1104,8 @@ int main(int argc, char **argv) {
     }
     if (iterations < 1) { fprintf(stderr, "chaoscope: --iterations must be >= 1\n"); return 1; }
     if (!(zoom > 0.0))  { fprintf(stderr, "chaoscope: --zoom must be > 0\n"); return 1; }
+    if (!(gamma_v >= 0.1 && gamma_v <= 10.0)) { fprintf(stderr, "chaoscope: --gamma must be 0.1..10\n"); return 1; }
+    lut_gamma = gamma_v;
     if (dt < 0.0)       { fprintf(stderr, "chaoscope: --dt must be > 0\n"); return 1; }
     if (anim < 0)       { fprintf(stderr, "chaoscope: --animation must be >= 0\n"); return 1; }
     if (splat_r < 0) splat_r = 0;
