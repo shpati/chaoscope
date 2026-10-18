@@ -28,7 +28,7 @@
 #include <time.h>
 
 /* Program version, kept in sync with the Win32 GUI front end. */
-#define CHAOSCOPE_VERSION "v1.0.0 by Shpati Koleka"
+#define CHAOSCOPE_VERSION "v1.0.1 by Shpati Koleka"
 
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
@@ -546,7 +546,11 @@ typedef struct {
     double yaw, pitch, roll; /* degrees */
     double zoom;
     double panx, pany;
-    int    splat;        /* splat radius (0..4)                       */
+    int    splat;        /* splat radius (0..4); 0 = anti-aliased line */
+    int    colorby;      /* CB_* : what drives the palette             */
+    int    oversample;   /* supersampling factor (1..8)                */
+    int    autofit;      /* fit the projected attractor to the frame   */
+    double norm_pct;     /* density percentile mapped to full brightness */
     double p[MAX_PARAMS];
     const SystemDef *sys;
 } RenderParams;
@@ -632,17 +636,27 @@ static const PaletteStop PAL_CHAOSCOPE[] = {
     {0.84,230, 40,120},{1.00,  0,  0, 90}
 };
 
+/* Non-cyclic red -> orange -> yellow -> green -> cyan -> blue -> purple.
+ * Use with --colorby x|y|depth|speed|radius so the gradient does not wrap. */
+static const PaletteStop PAL_SPECTRUM[] = {
+    {0.00,235, 40, 30},{0.17,255,150, 20},{0.30,230,230, 40},
+    {0.45, 60,220, 60},{0.60, 40,210,200},{0.78, 50, 90,230},
+    {1.00,150, 50,200}
+};
+
 static const struct { const char *name; const PaletteStop *stops; int n; } PALETTES[] = {
     { "rainbow",   PAL_RAINBOW,   (int)(sizeof(PAL_RAINBOW)/sizeof(PAL_RAINBOW[0])) },
     { "fire",      PAL_FIRE,      (int)(sizeof(PAL_FIRE)/sizeof(PAL_FIRE[0])) },
     { "ice",       PAL_ICE,       (int)(sizeof(PAL_ICE)/sizeof(PAL_ICE[0])) },
     { "plasma",    PAL_PLASMA,    (int)(sizeof(PAL_PLASMA)/sizeof(PAL_PLASMA[0])) },
     { "chaoscope", PAL_CHAOSCOPE, (int)(sizeof(PAL_CHAOSCOPE)/sizeof(PAL_CHAOSCOPE[0])) },
+    { "spectrum",  PAL_SPECTRUM,  (int)(sizeof(PAL_SPECTRUM)/sizeof(PAL_SPECTRUM[0])) },
 };
 #define NPAL ((int)(sizeof(PALETTES)/sizeof(PALETTES[0])))
 
 static unsigned char lut[3][256]; /* r,g,b lookup tables */
 static double lut_gamma = 1.0;    /* output gamma applied to the table */
+static double tone_gamma = 1.0;   /* brightness gamma (position-coloured modes) */
 
 /* Fill the lookup table from a stop list, rotated cyclically by `phase`. */
 static void build_lut(const PaletteStop *stops, int n, double phase) {
@@ -651,7 +665,7 @@ static void build_lut(const PaletteStop *stops, int n, double phase) {
         double v = (double)i / 255.0 + phase;
         double a, b, f;
         int seg = 0;
-        v -= floor(v);                          /* cyclic wrap in [0,1) */
+        if (v < 0.0 || v > 1.0) v -= floor(v);  /* cyclic wrap (1.0 itself is kept) */
         while (seg < n - 2 && v > stops[seg + 1].pos) seg++;
         a = stops[seg].pos;
         b = stops[seg + 1].pos;
@@ -728,9 +742,46 @@ static int cmp_double(const void *a, const void *b) {
     return (x > y) - (x < y);
 }
 
-/* Add a (2r+1)^2 soft-disk kernel, scaled by wt, centred on pixel (ix,iy). */
-static void splat(double *dens, int w, int h, int ix, int iy, int r,
-                  const double *kern, double wt) {
+/* What drives the colour of a point.  CB_DENSITY is the classic behaviour
+ * (palette index = log density).  The other modes colour each point by a
+ * property of the point itself (view-space x / y / depth, orbit speed, or
+ * distance from the centre) and use accumulated density only for brightness.
+ * Overlapping strands then blend their colours like translucent ribbons, a
+ * filament keeps a continuous hue gradient along its length, and sparse
+ * regions stay dim instead of being mapped to a different palette colour. */
+enum { CB_DENSITY = 0, CB_X, CB_Y, CB_DEPTH, CB_SPEED, CB_RADIUS, CB_COUNT };
+static const char *COLORBY_NAMES[CB_COUNT] = {
+    "density", "x", "y", "depth", "speed", "radius"
+};
+
+/* Rotate a normalised point: yaw (z), then pitch (x), then roll (y). */
+static void rotate_pt(double xn, double yn, double zn,
+                      double c0, double s0, double c1, double s1,
+                      double c2, double s2,
+                      double *rx, double *ry, double *rz) {
+    double t;
+    t = c0 * xn - s0 * yn;  yn = s0 * xn + c0 * yn;  xn = t;      /* z */
+    t = c1 * yn - s1 * zn;  zn = s1 * yn + c1 * zn;  yn = t;      /* x */
+    t = c2 * xn + s2 * zn;  zn = -s2 * xn + c2 * zn; xn = t;      /* y */
+    *rx = xn; *ry = yn; *rz = zn;
+}
+
+static double color_value(int mode, double rx, double ry, double rz, double speed) {
+    switch (mode) {
+    case CB_X:      return rx;
+    case CB_Y:      return ry;
+    case CB_DEPTH:  return rz;
+    case CB_SPEED:  return speed;
+    case CB_RADIUS: return sqrt(rx * rx + ry * ry + rz * rz);
+    default:        return 0.0;
+    }
+}
+
+/* Add a (2r+1)^2 soft-disk kernel, scaled by wt, centred on pixel (ix,iy).
+ * When col is non-NULL the colour c3 (weighted by the same amount) is
+ * accumulated too, so colour/density gives the mean colour of the pixel. */
+static void splat(double *dens, float *col, int w, int h, int ix, int iy, int r,
+                  const double *kern, double wt, const unsigned char *c3) {
     int dx, dy, kn = 2 * r + 1;
     for (dy = -r; dy <= r; dy++) {
         int yy = iy + dy;
@@ -738,8 +789,48 @@ static void splat(double *dens, int w, int h, int ix, int iy, int r,
         for (dx = -r; dx <= r; dx++) {
             int xx = ix + dx;
             double k = kern[(dy + r) * kn + (dx + r)];
+            size_t idx;
+            double v;
             if (k == 0.0 || xx < 0 || xx >= w) continue;
-            dens[(size_t)yy * (size_t)w + (size_t)xx] += k * wt;
+            idx = (size_t)yy * (size_t)w + (size_t)xx;
+            v = k * wt;
+            dens[idx] += v;
+            if (col) {
+                col[idx * 3 + 0] += (float)(v * c3[0]);
+                col[idx * 3 + 1] += (float)(v * c3[1]);
+                col[idx * 3 + 2] += (float)(v * c3[2]);
+            }
+        }
+    }
+}
+
+/* Sub-pixel (bilinear) splat: spreads wt over the 4 nearest pixel centres.
+ * Gives smooth, anti-aliased, ~1 pixel wide curves (used for --splat 0). */
+static void splat_aa(double *dens, float *col, int w, int h,
+                     double qx, double qy, double wt, const unsigned char *c3) {
+    double gx = qx - 0.5, gy = qy - 0.5;
+    double flx = floor(gx), fly = floor(gy);
+    int x0 = (int)flx, y0 = (int)fly;
+    double fx = gx - flx, fy = gy - fly;
+    int i, j;
+    for (j = 0; j < 2; j++) {
+        int yy = y0 + j;
+        double wy = j ? fy : 1.0 - fy;
+        if (yy < 0 || yy >= h) continue;
+        for (i = 0; i < 2; i++) {
+            int xx = x0 + i;
+            double wx = i ? fx : 1.0 - fx;
+            size_t idx;
+            double v;
+            if (xx < 0 || xx >= w) continue;
+            idx = (size_t)yy * (size_t)w + (size_t)xx;
+            v = wt * wx * wy;
+            dens[idx] += v;
+            if (col) {
+                col[idx * 3 + 0] += (float)(v * c3[0]);
+                col[idx * 3 + 1] += (float)(v * c3[1]);
+                col[idx * 3 + 2] += (float)(v * c3[2]);
+            }
         }
     }
 }
@@ -751,19 +842,33 @@ static int render_attractor(const RenderParams *rp, unsigned char *rgb,
                             int *restarts_out) {
     Solver sv;
     int i, restarts = 0;
+    int os = rp->oversample < 1 ? 1 : rp->oversample;
+    int W = rp->w * os, H = rp->h * os;          /* accumulation buffer size */
+    int use_col = (rp->colorby != CB_DENSITY);
     double *dens;
+    float *col = NULL;
     double minv[3], maxv[3];
     double center[3], scale;
-    double cx, cy, focal, persp;
+    double cx, cy, focal, focal_ref, persp;
     double c0, s0, c1, s1, c2, s2;   /* rotation cos/sin */
     double kern[81];
-    double ppx = 0.0, ppy = 0.0;     /* previous projected point */
+    double ppx = 0.0, ppy = 0.0, ptv = 0.0;   /* previous projected point / colour */
+    double cv_lo = 0.0, cv_hi = 1.0;          /* colour-variable range */
+    double fit_scale = 1.0, fit_dx = 0.0, fit_dy = 0.0;
     int have_prev = 0;
     int r = rp->splat, kn = 2 * rp->splat + 1;
     size_t npix = (size_t)rp->w * (size_t)rp->h, k, nz;
+    size_t bigpix = (size_t)W * (size_t)H;
+    unsigned char c3[3] = {255, 255, 255};
 
     *restarts_out = 0;
     solver_init(&sv, rp);
+
+    c0 = cos(DEG2RAD(rp->yaw));   s0 = sin(DEG2RAD(rp->yaw));
+    c1 = cos(DEG2RAD(rp->pitch)); s1 = sin(DEG2RAD(rp->pitch));
+    c2 = cos(DEG2RAD(rp->roll));  s2 = sin(DEG2RAD(rp->roll));
+    persp = 0.5;
+    focal_ref = (double)(W < H ? W : H) * 0.5 * FIT;   /* zoom-free focal length */
 
     /* burn-in */
     for (i = 0; i < rp->burn; i++)
@@ -772,9 +877,11 @@ static int render_attractor(const RenderParams *rp, unsigned char *rgb,
     /* Estimate the framing from a sample of the orbit (advances state too).
      * centre = bounding-box centre; scale = 1 / (distance to the farthest
      * sampled point), so the attractor fits in a unit sphere and therefore
-     * stays inside the image under any yaw/pitch/roll. */
+     * stays inside the image under any yaw/pitch/roll.  The same sample
+     * gives the range of the colour variable and, with --autofit, the
+     * projected bounding box used to frame the picture. */
     {
-        double *pts = (double *)malloc((size_t)rp->bounds_n * 3 * sizeof(double));
+        double *pts = (double *)malloc((size_t)rp->bounds_n * 4 * sizeof(double));
         size_t m = 0, q;
         double r2max = 0.0;
         if (!pts) return 1;
@@ -783,13 +890,16 @@ static int render_attractor(const RenderParams *rp, unsigned char *rgb,
         for (i = 0; i < rp->bounds_n; i++) {
             int st = step_checked(&sv, rp, &restarts);
             int a;
+            double dv[3];
             if (st < 0) { free(pts); *restarts_out = restarts; return 2; }
             if (st == 0) continue;
             for (a = 0; a < 3; a++) {
                 if (sv.s[a] < minv[a]) minv[a] = sv.s[a];
                 if (sv.s[a] > maxv[a]) maxv[a] = sv.s[a];
-                pts[m * 3 + (size_t)a] = sv.s[a];
+                pts[m * 4 + (size_t)a] = sv.s[a];
             }
+            sv.sys->deriv(sv.p, sv.s, dv);
+            pts[m * 4 + 3] = sqrt(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
             m++;
         }
         if (m == 0) { free(pts); *restarts_out = restarts; return 2; }
@@ -797,19 +907,63 @@ static int render_attractor(const RenderParams *rp, unsigned char *rgb,
         center[1] = (maxv[1] + minv[1]) * 0.5;
         center[2] = (maxv[2] + minv[2]) * 0.5;
         for (q = 0; q < m; q++) {
-            double ex = pts[q * 3 + 0] - center[0];
-            double ey = pts[q * 3 + 1] - center[1];
-            double ez = pts[q * 3 + 2] - center[2];
+            double ex = pts[q * 4 + 0] - center[0];
+            double ey = pts[q * 4 + 1] - center[1];
+            double ez = pts[q * 4 + 2] - center[2];
             double e2 = ex * ex + ey * ey + ez * ez;
             if (e2 > r2max) r2max = e2;
         }
-        free(pts);
         scale = (r2max > 1e-18) ? 1.0 / sqrt(r2max) : 1.0;
+
+        if (rp->autofit || use_col) {
+            double *vals = use_col ? (double *)malloc(m * sizeof(double)) : NULL;
+            double bx0 = 1e30, bx1 = -1e30, by0 = 1e30, by1 = -1e30;
+            if (use_col && !vals) { free(pts); return 1; }
+            for (q = 0; q < m; q++) {
+                double xn = (pts[q * 4 + 0] - center[0]) * scale;
+                double yn = (pts[q * 4 + 1] - center[1]) * scale;
+                double zn = (pts[q * 4 + 2] - center[2]) * scale;
+                double rx, ry, rz, d, px, py;
+                rotate_pt(xn, yn, zn, c0, s0, c1, s1, c2, s2, &rx, &ry, &rz);
+                if (use_col)
+                    vals[q] = color_value(rp->colorby, rx, ry, rz, pts[q * 4 + 3]);
+                d = 1.0 + persp * rz;
+                if (d < 0.05) d = 0.05;
+                px =  focal_ref * rx / d;      /* relative to the image centre */
+                py = -focal_ref * ry / d;
+                if (px < bx0) bx0 = px;
+                if (px > bx1) bx1 = px;
+                if (py < by0) by0 = py;
+                if (py > by1) by1 = py;
+            }
+            if (rp->autofit && bx1 > bx0 && by1 > by0) {
+                const double margin = 0.03;      /* 3 % empty border */
+                double sx = (double)W * (1.0 - 2.0 * margin) / (bx1 - bx0);
+                double sy = (double)H * (1.0 - 2.0 * margin) / (by1 - by0);
+                fit_scale = sx < sy ? sx : sy;
+                /* --zoom then acts about the centre of the fitted view */
+                fit_dx = -0.5 * (bx0 + bx1) * fit_scale * rp->zoom;
+                fit_dy = -0.5 * (by0 + by1) * fit_scale * rp->zoom;
+            }
+            if (use_col) {
+                /* 1 %..99 % range so a few outliers don't squash the gradient */
+                qsort(vals, m, sizeof(double), cmp_double);
+                cv_lo = vals[(size_t)((double)(m - 1) * 0.01)];
+                cv_hi = vals[(size_t)((double)(m - 1) * 0.99)];
+                if (!(cv_hi > cv_lo)) cv_hi = cv_lo + 1.0;
+                free(vals);
+            }
+        }
+        free(pts);
     }
 
-    /* density buffer */
-    dens = (double *)calloc(npix, sizeof(double));
+    /* density (and optional colour) buffers at accumulation resolution */
+    dens = (double *)calloc(bigpix, sizeof(double));
     if (!dens) return 1;
+    if (use_col) {
+        col = (float *)calloc(bigpix * 3, sizeof(float));
+        if (!col) { free(dens); return 1; }
+    }
 
     /* splat kernel */
     {
@@ -827,39 +981,26 @@ static int render_attractor(const RenderParams *rp, unsigned char *rgb,
         }
     }
 
-    /* projection constants */
-    cx = (double)rp->w * 0.5 + rp->panx;   /* was: (double)rp->w * 0.5; */
-    cy = (double)rp->h * 0.5 + rp->pany;   /* was: (double)rp->h * 0.5; */
-    focal = (double)(rp->w < rp->h ? rp->w : rp->h) * 0.5 * FIT * rp->zoom;
-    persp = 0.5;
-
-    c0 = cos(DEG2RAD(rp->yaw));   s0 = sin(DEG2RAD(rp->yaw));
-    c1 = cos(DEG2RAD(rp->pitch)); s1 = sin(DEG2RAD(rp->pitch));
-    c2 = cos(DEG2RAD(rp->roll));  s2 = sin(DEG2RAD(rp->roll));
+    /* projection constants (pan is given in output pixels) */
+    cx = (double)W * 0.5 + rp->panx * os + fit_dx;
+    cy = (double)H * 0.5 + rp->pany * os + fit_dy;
+    focal = focal_ref * rp->zoom * fit_scale;
 
     /* render pass */
     for (i = 0; i < rp->iterations; i++) {
         double xn, yn, zn;   /* normalised coordinates  */
         double rx, ry, rz;   /* rotated                 */
-        double d, px, py;
+        double d, px, py, cvt = 0.0;
         int st, n, j;
 
         st = step_checked(&sv, rp, &restarts);
-        if (st < 0) { free(dens); *restarts_out = restarts; return 2; }
+        if (st < 0) { free(dens); free(col); *restarts_out = restarts; return 2; }
         if (st == 0) { have_prev = 0; continue; }
 
         xn = (sv.s[0] - center[0]) * scale;
         yn = (sv.s[1] - center[1]) * scale;
         zn = (sv.s[2] - center[2]) * scale;
-
-        /* rotate: yaw (z), then pitch (x), then roll (y) */
-        {
-            double t;
-            t = c0 * xn - s0 * yn;  yn = s0 * xn + c0 * yn;  xn = t;      /* z */
-            t = c1 * yn - s1 * zn;  zn = s1 * yn + c1 * zn;  yn = t;      /* x */
-            t = c2 * xn + s2 * zn;  zn = -s2 * xn + c2 * zn; xn = t;      /* y */
-            rx = xn; ry = yn; rz = zn;
-        }
+        rotate_pt(xn, yn, zn, c0, s0, c1, s1, c2, s2, &rx, &ry, &rz);
 
         /* perspective projection */
         d = 1.0 + persp * rz;                 /* avoids divide-by-zero   */
@@ -868,26 +1009,67 @@ static int render_attractor(const RenderParams *rp, unsigned char *rgb,
         py = cy - focal * ry / d;
         if (!(px > -1e6 && px < 1e6 && py > -1e6 && py < 1e6)) { have_prev = 0; continue; }
 
-        /* Fill the gap to the previous point with up to 64 interpolated
-         * splats (weight 1/n each) so fast stretches of the orbit draw as
-         * a continuous curve instead of dotted lines, while the total
-         * weight per integration step stays 1 (density ~ time spent). */
+        if (use_col) {
+            double dv[3], sp;
+            sv.sys->deriv(sv.p, sv.s, dv);
+            sp = sqrt(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
+            cvt = clamp01((color_value(rp->colorby, rx, ry, rz, sp) - cv_lo) / (cv_hi - cv_lo));
+        }
+
+        /* Fill the gap to the previous point with interpolated splats
+         * (weight 1/n each, colour interpolated too) so fast stretches of
+         * the orbit draw as a continuous curve instead of dotted lines,
+         * while the total weight per integration step stays 1 (density ~
+         * time spent). */
         n = 1;
         if (have_prev) {
             double ddx = px - ppx, ddy = py - ppy;
             double dist = sqrt(ddx * ddx + ddy * ddy);
-            if (dist > 1.0 && dist < (double)(rp->w + rp->h)) {
+            if (dist > 1.0 && dist < (double)(W + H)) {
                 n = (int)ceil(dist);
-                if (n > 64) n = 64;
+                if (n > 64 * os) n = 64 * os;
             }
         }
         for (j = 1; j <= n; j++) {
             double t = (double)j / (double)n;
             double qx = (have_prev && n > 1) ? ppx + (px - ppx) * t : px;
             double qy = (have_prev && n > 1) ? ppy + (py - ppy) * t : py;
-            splat(dens, rp->w, rp->h, (int)floor(qx), (int)floor(qy), r, kern, 1.0 / (double)n);
+            if (use_col) {
+                double tv = (have_prev && n > 1) ? ptv + (cvt - ptv) * t : cvt;
+                int ci = (int)(clamp01(tv) * 255.0 + 0.5);
+                c3[0] = lut[0][ci]; c3[1] = lut[1][ci]; c3[2] = lut[2][ci];
+            }
+            if (r == 0)
+                splat_aa(dens, col, W, H, qx, qy, 1.0 / (double)n, c3);
+            else
+                splat(dens, col, W, H, (int)floor(qx), (int)floor(qy), r, kern,
+                      1.0 / (double)n, c3);
         }
-        ppx = px; ppy = py; have_prev = 1;
+        ppx = px; ppy = py; ptv = cvt; have_prev = 1;
+    }
+
+    /* supersampling: sum os x os blocks down to the output resolution */
+    if (os > 1) {
+        double *dd = (double *)calloc(npix, sizeof(double));
+        float *cc = use_col ? (float *)calloc(npix * 3, sizeof(float)) : NULL;
+        int x, y;
+        if (!dd || (use_col && !cc)) { free(dd); free(cc); free(dens); free(col); return 1; }
+        for (y = 0; y < H; y++) {
+            size_t row = (size_t)(y / os) * (size_t)rp->w;
+            for (x = 0; x < W; x++) {
+                size_t sidx = (size_t)y * (size_t)W + (size_t)x;
+                size_t didx = row + (size_t)(x / os);
+                if (dens[sidx] == 0.0) continue;
+                dd[didx] += dens[sidx];
+                if (use_col) {
+                    cc[didx * 3 + 0] += col[sidx * 3 + 0];
+                    cc[didx * 3 + 1] += col[sidx * 3 + 1];
+                    cc[didx * 3 + 2] += col[sidx * 3 + 2];
+                }
+            }
+        }
+        free(dens); free(col);
+        dens = dd; col = cc;
     }
 
     /* normalisation: pick the NORM_PCT percentile of the non-empty pixels
@@ -899,31 +1081,43 @@ static int render_attractor(const RenderParams *rp, unsigned char *rgb,
         if (nz > 0) {
             double *tmp = (double *)malloc(nz * sizeof(double));
             size_t m = 0;
-            if (!tmp) { free(dens); return 1; }
+            if (!tmp) { free(dens); free(col); return 1; }
             for (k = 0; k < npix; k++) if (dens[k] > 0.0) tmp[m++] = dens[k];
             qsort(tmp, nz, sizeof(double), cmp_double);
-            hi = tmp[(size_t)((double)(nz - 1) * NORM_PCT)];
+            hi = tmp[(size_t)((double)(nz - 1) * rp->norm_pct)];
             free(tmp);
             if (hi <= 0.0) hi = 1.0;
         }
 
-        /* density -> colour (log scaling, cyclic palette); empty = black */
         {
             double logmax = log(1.0 + hi);
             for (k = 0; k < npix; k++) {
                 if (dens[k] <= 0.0) {
                     rgb[k * 3 + 0] = rgb[k * 3 + 1] = rgb[k * 3 + 2] = 0;
-                } else {
+                } else if (!use_col) {
+                    /* density -> palette colour (log scaling); empty = black */
                     int idx = (int)(clamp01(log(1.0 + dens[k]) / logmax) * 255.0);
                     rgb[k * 3 + 0] = lut[0][idx];
                     rgb[k * 3 + 1] = lut[1][idx];
                     rgb[k * 3 + 2] = lut[2][idx];
+                } else {
+                    /* mean colour of the pixel, scaled by log-density brightness */
+                    double b = clamp01(log(1.0 + dens[k]) / logmax);
+                    double f;
+                    int c;
+                    if (tone_gamma != 1.0) b = pow(b, 1.0 / tone_gamma);
+                    f = b / dens[k];
+                    for (c = 0; c < 3; c++) {
+                        double v = (double)col[k * 3 + (size_t)c] * f + 0.5;
+                        rgb[k * 3 + (size_t)c] = (unsigned char)(v > 255.0 ? 255.0 : v);
+                    }
                 }
             }
         }
     }
 
     free(dens);
+    free(col);
     *restarts_out = restarts;
     return 0;
 }
@@ -949,10 +1143,18 @@ static void usage(FILE *out) {
     fprintf(out, "  --zoom <f>           zoom factor (default 1)\n");
     fprintf(out, "  --panx <f>           horizontal pan in pixels (default 0)\n");
     fprintf(out, "  --pany <f>           vertical pan in pixels (default 0)\n");
-    fprintf(out, "  --palette <name>     rainbow|fire|ice|plasma|chaoscope (default chaoscope)\n");
+    fprintf(out, "  --palette <name>     rainbow|fire|ice|plasma|chaoscope|spectrum (default chaoscope)\n");
+    fprintf(out, "  --colorby <mode>     density|x|y|depth|speed|radius (default density); anything\n"
+                 "                       but density colours points by that property and uses\n"
+                 "                       density only for brightness (try with --palette spectrum)\n");
     fprintf(out, "  --cycle <f>          palette cycle phase 0..1 (default 0)\n");
-    fprintf(out, "  --splat <n>          splat radius 0..4 (default 2)\n");
-    fprintf(out, "  --gamma <f>          output gamma 0.1..10 (default 1; >1 brightens dim regions)\n");
+    fprintf(out, "  --splat <n>          splat radius 0..4 (default 2; 0 = thin anti-aliased line)\n");
+    fprintf(out, "  --norm <f>           density percentile mapped to full brightness, 0.5..1 (default 0.998;\n"
+                 "                       lower = more pixels saturate, higher contrast)\n");
+    fprintf(out, "  --oversample <n>     supersampling factor 1..8 (default 1)\n");
+    fprintf(out, "  --autofit            scale and centre the view so the attractor fills the frame\n");
+    fprintf(out, "  --gamma <f>          output gamma 0.1..10 (default 1; >1 brightens dim regions,\n"
+                 "                       <1 darkens them / gives more contrast)\n");
     fprintf(out, "  --params a,b,c,...   override leading system parameters (see --list)\n");
     fprintf(out, "  --seed <n>           RNG seed (default time-based)\n");
     fprintf(out, "  --output <file.bmp>  output file (default attractor.bmp)\n");
@@ -974,6 +1176,13 @@ static int find_palette(const char *name) {
     int i;
     for (i = 0; i < NPAL; i++)
         if (strcmp(PALETTES[i].name, name) == 0) return i;
+    return -1;
+}
+
+static int find_colorby(const char *name) {
+    int i;
+    for (i = 0; i < CB_COUNT; i++)
+        if (strcmp(COLORBY_NAMES[i], name) == 0) return i;
     return -1;
 }
 
@@ -1020,6 +1229,8 @@ int main(int argc, char **argv) {
     double panx = 0.0, pany = 0.0;
     double gamma_v = 1.0;
     int splat_r = 2;
+    int colorby = CB_DENSITY, oversample = 1, autofit = 0;
+    double norm_pct = NORM_PCT;
     char outfile[256] = "attractor.bmp";
     int anim = 0;
     char prefix[256] = "frame";
@@ -1099,6 +1310,14 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "--gamma") == 0)     { if (!val || !parse_double(val, &gamma_v)) return bad_value(a); i++; }
         else if (strcmp(a, "--cycle") == 0)     { if (!val || !parse_double(val, &cycle))   return bad_value(a); i++; }
         else if (strcmp(a, "--splat") == 0)     { if (!val || !parse_int(val, &splat_r))    return bad_value(a); i++; }
+        else if (strcmp(a, "--colorby") == 0) {
+            int c = (val ? find_colorby(val) : -1);
+            if (c < 0) { fprintf(stderr, "chaoscope: unknown --colorby '%s' (density|x|y|depth|speed|radius)\n", val ? val : ""); return 1; }
+            colorby = c; i++;
+        }
+        else if (strcmp(a, "--norm") == 0)      { if (!val || !parse_double(val, &norm_pct)) return bad_value(a); i++; }
+        else if (strcmp(a, "--oversample") == 0){ if (!val || !parse_int(val, &oversample)) return bad_value(a); i++; }
+        else if (strcmp(a, "--autofit") == 0)   { autofit = 1; }
         else if (strcmp(a, "--seed") == 0)      { if (!val || !parse_int(val, &seed))       return bad_value(a); i++; }
         else if (strcmp(a, "--animation") == 0) { if (!val || !parse_int(val, &anim))       return bad_value(a); i++; }
         else if (strcmp(a, "--output") == 0)    { if (!val) return bad_value(a); strncpy(outfile, val, sizeof(outfile) - 1); outfile[sizeof(outfile) - 1] = 0; i++; }
@@ -1114,7 +1333,16 @@ int main(int argc, char **argv) {
     if (iterations < 1) { fprintf(stderr, "chaoscope: --iterations must be >= 1\n"); return 1; }
     if (!(zoom > 0.0))  { fprintf(stderr, "chaoscope: --zoom must be > 0\n"); return 1; }
     if (!(gamma_v >= 0.1 && gamma_v <= 10.0)) { fprintf(stderr, "chaoscope: --gamma must be 0.1..10\n"); return 1; }
-    lut_gamma = gamma_v;
+    /* density mode: gamma shapes the palette; otherwise it shapes brightness */
+    if (colorby == CB_DENSITY) { lut_gamma = gamma_v; tone_gamma = 1.0; }
+    else                       { lut_gamma = 1.0;     tone_gamma = gamma_v; }
+    if (!(norm_pct >= 0.5 && norm_pct <= 1.0)) { fprintf(stderr, "chaoscope: --norm must be 0.5..1\n"); return 1; }
+    if (oversample < 1 || oversample > 8) { fprintf(stderr, "chaoscope: --oversample must be 1..8\n"); return 1; }
+    if ((double)width * oversample * (double)height * oversample > 6e7) {
+        fprintf(stderr, "chaoscope: --oversample %d makes the working buffer too large for %dx%d; lower it\n",
+                oversample, width, height);
+        return 1;
+    }
     if (dt < 0.0)       { fprintf(stderr, "chaoscope: --dt must be > 0\n"); return 1; }
     if (anim < 0)       { fprintf(stderr, "chaoscope: --animation must be >= 0\n"); return 1; }
     if (splat_r < 0) splat_r = 0;
@@ -1138,6 +1366,8 @@ int main(int argc, char **argv) {
     rp.yaw = yaw; rp.pitch = pitch; rp.roll = roll;
     rp.zoom = zoom; rp.splat = splat_r;
     rp.panx = panx; rp.pany = pany;
+    rp.colorby = colorby; rp.oversample = oversample; rp.autofit = autofit;
+    rp.norm_pct = norm_pct;
 
     if (pi < 0) pi = find_palette("chaoscope");
 

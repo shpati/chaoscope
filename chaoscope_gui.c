@@ -70,7 +70,7 @@
 #define UD_OFS          100      /* up-down id = its edit's id + UD_OFS   */
 
 /* Program version, kept in sync with the chaoscope.c renderer. */
-#define CHAOSCOPE_VERSION "1.0.0"
+#define CHAOSCOPE_VERSION "1.0.1"
 
 enum {
     IDC_SYS = 100, IDC_DESC,
@@ -81,7 +81,7 @@ enum {
     IDC_YAWV = 160,                       /* 160..164 value labels          */
     IDC_RESETVIEW = 170,
     IDC_PAL  = 180, IDC_SPLAT, IDC_W, IDC_H, IDC_ITER, IDC_SEED, IDC_DICE,
-    IDC_SPIN, IDC_AUTO,
+    IDC_SPIN, IDC_AUTO, IDC_COLORBY,
     IDC_RENDER = 190, IDC_SAVE, IDC_COPY, IDC_FRAMES, IDC_ANIM,
     IDC_STATUS = 300
 };
@@ -105,9 +105,16 @@ typedef struct {
 
 typedef struct {
     int    sys, pal, splat, w, h, iters, seed;
+    int    colorby;             /* index into COLORBY[]                   */
     double p[UIP], dt;
     double yaw, pitch, roll, zoom, cycle, panx, pany, gam;
 } Settings;
+
+/* --colorby modes understood by chaoscope.exe; index 0 is its default
+ * ("density"), for which no option is passed so that an older chaoscope.exe
+ * without --colorby keeps working. */
+static const char *const COLORBY[] = { "density", "x", "y", "depth", "speed", "radius" };
+#define NCOLORBY ((int)(sizeof COLORBY / sizeof COLORBY[0]))
 
 static Sys  g_sys[MAXSYS];  static int g_nsys;
 static char g_pal[MAXPAL][24]; static int g_npal;
@@ -369,6 +376,8 @@ static int read_settings(Settings *s, char *err, size_t ecap) {
     if (s->splat < 0) s->splat = 2;
     s->pal = (int)SendMessage(CTL(IDC_PAL), CB_GETCURSEL, 0, 0);
     if (s->pal < 0) s->pal = 0;
+    s->colorby = (int)SendMessage(CTL(IDC_COLORBY), CB_GETCURSEL, 0, 0);
+    if (s->colorby < 0 || s->colorby >= NCOLORBY) s->colorby = 0;
     s->yaw = g.vw[0]; s->pitch = g.vw[1]; s->roll = g.vw[2];
     s->zoom = g.vw[3]; s->cycle = g.vw[4]; s->gam = g.vw[5];
     s->panx = g.panx; s->pany = g.pany;
@@ -397,6 +406,10 @@ static void build_cmd(char *d, size_t cap, const Settings *s, const char *exe,
         exe, sy->name, s->w, s->h, s->iters, s->dt, s->yaw, s->pitch, s->roll,
         s->zoom, g_pal[s->pal], s->cycle, s->splat, s->seed, s->panx, s->pany, s->gam);
     if (n < 0 || (size_t)n >= cap) return;
+    if (s->colorby > 0 && s->colorby < NCOLORBY) {
+        n += snprintf(d + n, cap - n, " --colorby %s", COLORBY[s->colorby]);
+        if (n < 0 || (size_t)n >= cap) return;
+    }
     if (sy->np > 0) {
         n += snprintf(d + n, cap - n, " --params ");
         for (i = 0; i < sy->np && (size_t)n < cap; i++)
@@ -826,40 +839,44 @@ static void build_controls(void) {
     mk("STATIC", "drag: roll/pitch  right-drag: yaw", SS_LEFT, 0, 124, 429, 202, 18, 0);
 
     /* render */
-    group("Render", 464, 136);
+    group("Render", 464, 132);
     lab("Palette", 14, 484, 46);
-    c = mk("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 60, 484, 112, 200, IDC_PAL);
+    c = mk("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 60, 484, 80, 200, IDC_PAL);
     for (i = 0; i < g_npal; i++) SendMessage(c, CB_ADDSTRING, 0, (LPARAM)g_pal[i]);
-    lab("Splat", 184, 484, 34);
-    c = mk("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 220, 484, 106, 200, IDC_SPLAT);
+    lab("Splat", 144, 484, 34);
+    c = mk("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 176, 484, 35, 200, IDC_SPLAT);
     for (i = 0; i <= 4; i++) { char b[4]; snprintf(b, sizeof b, "%d", i); SendMessage(c, CB_ADDSTRING, 0, (LPARAM)b); }
-    lab("Size", 14, 512, 46);
-    edit(IDC_W, 60, 512, 56);
-    lab("x", 121, 512, 10);
-    edit(IDC_H, 134, 512, 56);
-    lab("Iter", 200, 512, 30);
-    edit(IDC_ITER, 232, 512, 94);
-    lab("Seed", 14, 540, 46);
-    edit(IDC_SEED, 60, 540, 70);
-    mk("BUTTON", "New", BS_PUSHBUTTON | WS_TABSTOP, 0, 136, 539, 50, 24, IDC_DICE);
-    mk("BUTTON", "Spin", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 210, 541, 116, 20, IDC_SPIN);
-    mk("BUTTON", "Full quality when idle", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 14, 568, 312, 20, IDC_AUTO);
+    lab("Color by", 218, 484, 50);
+    c = mk("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, 0, 266, 484, 60, 200, IDC_COLORBY);
+    for (i = 0; i < NCOLORBY; i++) SendMessage(c, CB_ADDSTRING, 0, (LPARAM)COLORBY[i]);
+    lab("Size", 14, 514, 46);
+    edit(IDC_W, 60, 514, 56);
+    lab("x", 121, 514, 10);
+    edit(IDC_H, 134, 514, 56);
+    lab("Iter", 200, 514, 30);
+    edit(IDC_ITER, 232, 514, 94);
+    lab("Seed", 14, 544, 46);
+    edit(IDC_SEED, 60, 544, 70);
+    mk("BUTTON", "New", BS_PUSHBUTTON | WS_TABSTOP, 0, 136, 543, 50, 24, IDC_DICE);
+    mk("BUTTON", "Spin", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 210, 545, 116, 20, IDC_SPIN);
+    mk("BUTTON", "Full quality when idle", BS_AUTOCHECKBOX | WS_TABSTOP, 0, 14, 572, 312, 20, IDC_AUTO);
 
     /* actions */
-    y = 608;
+    y = 604;
     mk("BUTTON", "Render", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 6, y, 100, 30, IDC_RENDER);
     mk("BUTTON", "Save image...", BS_PUSHBUTTON | WS_TABSTOP, 0, 112, y, 112, 30, IDC_SAVE);
     mk("BUTTON", "Copy command", BS_PUSHBUTTON | WS_TABSTOP, 0, 230, y, 104, 30, IDC_COPY);
-    y = 646;
+    y = 642;
     lab("Frames", 6, y + 1, 46);
-    edit(IDC_FRAMES, 54, y + 1, 56);
-    mk("BUTTON", "Render animation...", BS_PUSHBUTTON | WS_TABSTOP, 0, 118, y, 216, 28, IDC_ANIM);
+    edit(IDC_FRAMES, 54, y + 3, 52);
+    mk("BUTTON", "Render animation...", BS_PUSHBUTTON | WS_TABSTOP, 0, 112, y, 222, 28, IDC_ANIM);
     g.content_h = S(y + 28 + 10);
 
     /* initial values */
     for (i = 0; i < 6; i++) g.vw[i] = VIEW_DEFAULT[i];
     set_view_ui();
     SendMessage(CTL(IDC_SPLAT), CB_SETCURSEL, 2, 0);
+    SendMessage(CTL(IDC_COLORBY), CB_SETCURSEL, 0, 0);
     SetWindowText(CTL(IDC_W), "3840");
     SetWindowText(CTL(IDC_H), "2160");
     SetWindowText(CTL(IDC_ITER), "500000");
@@ -961,7 +978,7 @@ static void on_command(WPARAM w) {
             request_render();
         }
         return;
-    case IDC_PAL: case IDC_SPLAT:
+    case IDC_PAL: case IDC_SPLAT: case IDC_COLORBY:
         if (code == CBN_SELCHANGE) request_render();
         return;
     case IDC_DEFAULTS:
