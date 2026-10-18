@@ -95,6 +95,7 @@ Run `chaoscope --help` for the full option list.
 | `--zoom <f>` | Zoom factor |
 | `--panx` / `--pany` | Pan in pixels |
 | `--palette <name>` | `rainbow`, `fire`, `ice`, `plasma`, `chaoscope` |
+| `--colorby <mode>` | `density`, `x`, `y`, `depth`, `speed`, `radius` (default `density`) |
 | `--cycle <f>` | Palette cycle phase 0..1 |
 | `--splat <n>` | Splat radius 0..4 (default 2) |
 | `--gamma <f>` | Output gamma 0.1..10 |
