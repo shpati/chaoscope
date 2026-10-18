@@ -27,6 +27,9 @@
 #include <math.h>
 #include <time.h>
 
+/* Program version, kept in sync with the Win32 GUI front end. */
+#define CHAOSCOPE_VERSION "v1.0.0 by Shpati Koleka"
+
 /* ------------------------------------------------------------------ */
 /* Small helpers                                                       */
 /* ------------------------------------------------------------------ */
@@ -930,17 +933,18 @@ static int render_attractor(const RenderParams *rp, unsigned char *rgb,
 /* ------------------------------------------------------------------ */
 
 static void usage(FILE *out) {
-    fprintf(out, "chaoscope -- a pure-C Chaoscope-style strange attractor renderer\n");
+    fprintf(out, "chaoscope %s -- a pure-C Chaoscope-style strange attractor renderer\n",
+            CHAOSCOPE_VERSION);
     fprintf(out, "Usage: chaoscope [options]\n");
     fprintf(out, "  --system <name>      attractor system (default lorenz)\n");
     fprintf(out, "  --list               list systems, parameters and palettes\n");
     fprintf(out, "  --list-tsv           same, tab-separated, for front ends\n");
-    fprintf(out, "  --width <n>          image width  (default 800)\n");
-    fprintf(out, "  --height <n>         image height (default 600)\n");
-    fprintf(out, "  --iterations <n>     ODE steps to render (default 400000)\n");
+    fprintf(out, "  --width <n>          image width  (default 3840)\n");
+    fprintf(out, "  --height <n>         image height (default 2160)\n");
+    fprintf(out, "  --iterations <n>     ODE steps to render (default 500000)\n");
     fprintf(out, "  --dt <f>             integration step (default per-system)\n");
-    fprintf(out, "  --yaw <deg>          rotation around z (default 0)\n");
-    fprintf(out, "  --pitch <deg>        rotation around x (default 0)\n");
+    fprintf(out, "  --yaw <deg>          rotation around z (default 180)\n");
+    fprintf(out, "  --pitch <deg>        rotation around x (default 180)\n");
     fprintf(out, "  --roll <deg>         rotation around y (default 0)\n");
     fprintf(out, "  --zoom <f>           zoom factor (default 1)\n");
     fprintf(out, "  --panx <f>           horizontal pan in pixels (default 0)\n");
@@ -954,6 +958,7 @@ static void usage(FILE *out) {
     fprintf(out, "  --output <file.bmp>  output file (default attractor.bmp)\n");
     fprintf(out, "  --animation <n>      render n frames (camera orbits, palette cycles)\n");
     fprintf(out, "  --prefix <str>       frame filename prefix (default 'frame')\n");
+    fprintf(out, "  --version            show version and exit\n");
     fprintf(out, "  --help               show this help\n");
     fprintf(out, "Example: chaoscope --system thomas --yaw 30 --pitch 20 --palette rainbow\n");
 }
@@ -1007,10 +1012,10 @@ static int bad_value(const char *opt) {
 int main(int argc, char **argv) {
     RenderParams rp;
     int i, si, pi = -1;
-    int width = 800, height = 600;
-    int iterations = 400000;
+    int width = 3840, height = 2160;
+    int iterations = 500000;
     double dt = 0.0;                     /* 0 => per-system default */
-    double yaw = 0.0, pitch = 0.0, roll = 0.0;
+    double yaw = 180.0, pitch = 180.0, roll = 0.0;
     double zoom = 1.0, cycle = 0.0;
     double panx = 0.0, pany = 0.0;
     double gamma_v = 1.0;
@@ -1018,7 +1023,7 @@ int main(int argc, char **argv) {
     char outfile[256] = "attractor.bmp";
     int anim = 0;
     char prefix[256] = "frame";
-    int seed = 0;
+    int seed = 42;
     const char *params_arg = NULL;
     unsigned long long base_seed;
     unsigned char *rgb;
@@ -1035,6 +1040,10 @@ int main(int argc, char **argv) {
 
         if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
             usage(stdout);
+            return 0;
+        }
+        else if (strcmp(a, "--version") == 0 || strcmp(a, "-V") == 0) {
+            printf("chaoscope %s\n", CHAOSCOPE_VERSION);
             return 0;
         }
         else if (strcmp(a, "--list") == 0) {

@@ -8,7 +8,7 @@
  *
  *   change any control   quick low-resolution preview, then a full-quality
  *                        render once nothing has changed for ~1 s
- *   drag on the image    rotate (yaw / pitch)      right-drag: roll
+ *   drag on the image    rotate (roll / yaw)      right-drag: pitch
  *   mouse wheel          zoom                      Spin: continuous yaw
  *
  * Build (MinGW-w64):
@@ -68,6 +68,9 @@
 #define FULL_IDLE_MS    900      /* idle time before the full render      */
 #define SPIN_STEP       3.0      /* degrees of yaw per spin frame         */
 #define UD_OFS          100      /* up-down id = its edit's id + UD_OFS   */
+
+/* Program version, kept in sync with the chaoscope.c renderer. */
+#define CHAOSCOPE_VERSION "1.0.0"
 
 enum {
     IDC_SYS = 100, IDC_DESC,
@@ -163,6 +166,19 @@ static void set_status(const char *fmt, ...) {
     va_end(ap);
     b[sizeof b - 1] = 0;
     SendMessage(g.status, SB_SETTEXT, 0, (LPARAM)b);
+}
+
+/* Split the status bar so its right part always shows the version. */
+static void status_setup(void) {
+    int parts[2];
+    RECT rc;
+    if (!g.status) return;
+    GetClientRect(g.hwnd, &rc);
+    parts[0] = rc.right - S(250);
+    if (parts[0] < 0) parts[0] = 0;
+    parts[1] = -1;                             /* extend to the right edge */
+    SendMessage(g.status, SB_SETPARTS, 2, (LPARAM)parts);
+    SendMessage(g.status, SB_SETTEXT, 1, (LPARAM)"Chaoscope by Shpati Koleka, v" CHAOSCOPE_VERSION);
 }
 
 static int finite_d(double v) { return v == v && v > -1e300 && v < 1e300; }
@@ -721,8 +737,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             int x = (int)(short)LOWORD(l), y = (int)(short)HIWORD(l);
             double dx = x - g.dx0, dy = y - g.dy0;
             g.dx0 = x; g.dy0 = y;
-            if (g.drag == 1) { g.vw[0] = wrap180(g.vw[0] + dx * 0.5); g.vw[1] = wrap180(g.vw[1] - dy * 0.5); }
-            else if (g.drag == 2) { g.vw[2] = wrap180(g.vw[2] + dx * 0.5); }
+            if (g.drag == 1) { g.vw[2] = wrap180(g.vw[2] + dx * 0.5); g.vw[1] = wrap180(g.vw[1] - dy * 0.5); }
+            else if (g.drag == 2) { g.vw[0] = wrap180(g.vw[0] + dx * 0.5); }
             else { g.panx += dx; g.pany += dy; }
             set_view_ui();
             request_render();
@@ -807,7 +823,7 @@ static void build_controls(void) {
         mk("STATIC", "", SS_LEFT, 0, 264, yy + 3, 62, 18, IDC_YAWV + i);
     }
     mk("BUTTON", "Reset view", BS_PUSHBUTTON | WS_TABSTOP, 0, 14, 424, 100, 26, IDC_RESETVIEW);
-    mk("STATIC", "drag image: rotate", SS_LEFT, 0, 124, 429, 202, 18, 0);
+    mk("STATIC", "drag: roll/pitch  right-drag: yaw", SS_LEFT, 0, 124, 429, 202, 18, 0);
 
     /* render */
     group("Render", 464, 136);
@@ -1022,6 +1038,7 @@ static void layout(void) {
     GetClientRect(g.hwnd, &rc);
     w = rc.right; h = rc.bottom;
     SendMessage(g.status, WM_SIZE, 0, 0);
+    status_setup();
     GetWindowRect(g.status, &rc);
     sh = rc.bottom - rc.top;
     pw = g.panel_w;
@@ -1063,7 +1080,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         build_controls();
         g.ui_lock--;
         layout();
-        set_status("Drag the image to rotate, mouse wheel to zoom");
+        set_status("Drag the image to roll/pitch, right-drag to yaw, mouse wheel to zoom");
         return 0;
     case WM_SIZE:
         layout();
