@@ -1,9 +1,7 @@
 # chaoscope
 
 A pure-C renderer for **strange attractors**, inspired by Nicolas Desprez's
-[Chaoscope](http://www.chaoscope.org/). It integrates a chaotic dynamical system,
-rotates and zooms a 3D view, cycles a colour palette, and renders the trajectory
-as a density-accumulated point cloud to a 24-bit BMP.
+[Chaoscope](https://web.archive.org/web/20190920193544/http://chaoscope.org/download.htm). It integrates a chaotic dynamical system, rotates and zooms a 3D view, cycles a colour palette, and renders the trajectory as a density-accumulated point cloud to a 24-bit BMP.
 
 The core (`chaoscope.c`) is a single-file C99 program with **no third-party
 dependencies** — only the standard library (`<stdio.h>`, `<stdlib.h>`,
